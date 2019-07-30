@@ -9,7 +9,9 @@
 
 #include "mp4record.h"
 #include <stdlib.h>
-
+#include <stdio.h>
+#include <cstring>
+#define H264_START_CODE 0x000001
 
 typedef struct MP4V2_CONTEXT{
     
@@ -114,7 +116,7 @@ int mp4VEncode(uint8_t * _naluData ,int _naluSize){
             IFrameData[2] = (_naluSize-3) >>8;
             IFrameData[3] = (_naluSize-3) &0xff;
     
-            memcpy(IFrameData+4,_naluData+3,_naluSize-3);
+            std::memcpy(IFrameData+4,_naluData+3,_naluSize-3);
 //            if(!MP4WriteSample(recordCtx->m_mp4FHandle, recordCtx->m_vTrackId, IFrameData, _naluSize+1, recordCtx->m_vFrameDur/44100*90000, 0, 1)){
 //                return -1;
 //            }
@@ -137,7 +139,7 @@ int mp4VEncode(uint8_t * _naluData ,int _naluSize){
 //                return -1;
 //            }
 //            recordCtx->m_vFrameDur = 0;
-            if(!MP4WriteSample(recordCtx->m_mp4FHandle, recordCtx->m_vTrackId, _naluData, _naluSize, MP4_INVALID_DURATION, 0, 1)){
+            if(!MP4WriteSample(recordCtx->m_mp4FHandle, recordCtx->m_vTrackId, _naluData, _naluSize, MP4_INVALID_DURATION, 0, 0)){
                 return -1;
             }
             break;
@@ -169,4 +171,142 @@ void closeMp4Encoder(){
     
     printf("ok  : closeMp4Encoder  \n");
 
+}
+
+uint32_t h264_find_next_start_code (uint8_t *pBuf, 
+				    uint32_t bufLen)
+{
+  uint32_t val;
+  uint32_t offset;
+
+  offset = 0;
+  if (pBuf[0] == 0 && pBuf[1] == 0 && pBuf[2] == 0 && pBuf[3] == 1) {
+    pBuf += 4;
+    offset = 4;
+  } else if (pBuf[0] == 0 && pBuf[1] == 0 && pBuf[2] == 1) {
+    pBuf += 3;
+    offset = 3;
+  }
+  val = 0xffffffff;
+  while (offset < bufLen - 3) {
+    val <<= 8;
+    val |= *pBuf++;
+    offset++;
+    if (val == H264_START_CODE) {
+      return offset - 4;
+    }
+    if ((val & 0x00ffffff) == H264_START_CODE) {
+      return offset - 3;
+    }
+  }
+  return 0;
+}
+
+static uint32_t remove_03 (uint8_t *bptr, uint32_t len)
+{
+  uint32_t nal_len = 0;
+
+  while (nal_len + 2 < len) {
+    if (bptr[0] == 0 && bptr[1] == 0 && bptr[2] == 3) {
+      bptr += 2;
+      nal_len += 2;
+      len--;
+      std::memmove(bptr, bptr + 1, len - nal_len);
+    } else {
+      bptr++;
+      nal_len++;
+    }
+  }
+  return len;
+}
+
+int main (int argc, char **argv)
+{
+#define MAX_BUFFER 65536 * 8
+  
+  uint8_t buffer[MAX_BUFFER];
+  uint32_t buffer_on, buffer_size;
+  uint64_t bytes = 0;
+  FILE *m_file;
+  
+  bool have_prevdec = false;
+ 
+    m_file = fopen("test.h264", "rb");
+
+  if (m_file == NULL) {
+    fprintf(stderr, "file not found\n");
+    exit(-1);
+  }
+
+  buffer_on = buffer_size = 0;
+  while (!feof(m_file)) {
+    bytes += buffer_on;
+    if (buffer_on != 0) {
+      buffer_on = buffer_size - buffer_on;
+      std::memmove(buffer, &buffer[buffer_size - buffer_on], buffer_on);
+    }
+    buffer_size = fread(buffer + buffer_on, 
+			1, 
+			MAX_BUFFER - buffer_on, 
+			m_file);
+    buffer_size += buffer_on;
+    buffer_on = 0;
+
+    bool done = false;
+    //CBitstream ourbs;
+    do {
+      uint32_t ret;
+      ret = h264_find_next_start_code(buffer + buffer_on, 
+				      buffer_size - buffer_on);
+      if (ret == 0) {
+	done = true;
+	if (buffer_on == 0) {
+	  fprintf(stderr, "couldn't find start code in buffer from 0\n");
+	  exit(-1);
+	}
+      } else {
+	// have a complete NAL from buffer_on to end
+	if (ret > 3) {
+	  uint32_t nal_len;
+
+	  nal_len = remove_03(buffer + buffer_on, ret);
+
+	  printf("Nal length %u start code %u bytes \n", nal_len, 
+		 buffer[buffer_on + 2] == 1 ? 3 : 4);
+
+#if 0
+	  ourbs.init(buffer + buffer_on, nal_len * 8);
+	  uint8_t type;
+	  type = h264_parse_nal(&dec, &ourbs);
+	  if (type >= 1 && type <= 5) {
+	    if (have_prevdec) {
+	      // compare the 2
+	      bool bound;
+	      bound = compare_boundary(&prevdec, &dec);
+	      printf("Nal is %s\n", bound ? "part of last picture" : "new picture");
+	    }
+	    memcpy(&prevdec, &dec, sizeof(dec));
+	    have_prevdec = true;
+	  } else if (type >= 9 && type <= 11) {
+	    have_prevdec = false; // don't need to check
+	  }
+#endif
+	}
+#if 1
+	printf("buffer on \"X64\" %lu len %u %02x %02x %02x %02x\n",
+	       bytes + buffer_on, 
+	       bytes + buffer_on + ret,
+	       buffer_on, 
+	       ret,
+	       buffer[buffer_on],
+	       buffer[buffer_on+1],
+	       buffer[buffer_on+2],
+	       buffer[buffer_on+3]);
+#endif
+	buffer_on += ret; // buffer_on points to next code
+      }
+    } while (done == false);
+  }
+  fclose(m_file);
+  return 0;
 }

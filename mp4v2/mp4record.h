@@ -9,7 +9,7 @@
 #ifndef __RTSP_Player__mp4record__
 #define __RTSP_Player__mp4record__
 
-#include "mp4v2.h"
+#include "mp4v2/mp4v2.h"
 
 #define  _NALU_SPS_  0
 #define  _NALU_PPS_  1
